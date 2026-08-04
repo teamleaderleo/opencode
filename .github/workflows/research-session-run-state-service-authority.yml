@@ -27,3 +27,5 @@ jobs:
       - name: Run direct SessionRunState authority regression
         working-directory: packages/opencode
         run: bun test test/session/run-state-service-authority.test.ts --timeout 30000
+
+# One-time owned-fork characterization for Scout 528.
