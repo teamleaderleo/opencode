@@ -1,13 +1,12 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { afterEach, describe, expect } from "bun:test"
+import { describe, expect } from "bun:test"
 import { Deferred, Effect, Fiber, Layer, Ref } from "effect"
 import { BackgroundJob } from "@/background/job"
 import { SessionRunState } from "@/session/run-state"
 import { SessionID } from "@/session/schema"
 import { SessionStatus } from "@/session/status"
-import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 
 let idlePublicationStarted!: Deferred.Deferred<void>
 let allowIdlePublication!: Deferred.Deferred<void>
@@ -52,10 +51,6 @@ const it = testEffect(layer)
 const output = {} as SessionV1.WithParts
 const sessionID = "ses_run_state_authority" as SessionID
 
-afterEach(async () => {
-  await disposeAllInstances()
-})
-
 describe("SessionRunState service authority", () => {
   it.live(
     "an older idle publication cannot overwrite replacement busy state",
@@ -74,7 +69,10 @@ describe("SessionRunState service authority", () => {
           )
           .pipe(Effect.forkChild)
 
-        yield* Deferred.await(idlePublicationStarted)
+        yield* awaitWithTimeout(
+          Deferred.await(idlePublicationStarted),
+          "timed out waiting for the first idle publication barrier",
+        )
 
         const replacement = yield* runState
           .ensureRunning(
@@ -95,8 +93,16 @@ describe("SessionRunState service authority", () => {
         yield* Effect.sleep("100 millis")
 
         yield* Deferred.succeed(allowIdlePublication, undefined)
-        expect(yield* Fiber.join(first)).toBe(output)
-        yield* Deferred.await(replacementStarted)
+        expect(
+          yield* awaitWithTimeout(
+            Fiber.join(first),
+            "timed out waiting for the first run to settle after idle release",
+          ),
+        ).toBe(output)
+        yield* awaitWithTimeout(
+          Deferred.await(replacementStarted),
+          "timed out waiting for replacement work to start",
+        )
 
         // Capture the status before replacement completion publishes its own
         // idle transition. Current source records stale idle here; a repair
@@ -106,7 +112,12 @@ describe("SessionRunState service authority", () => {
         // Always let the replacement finish before asserting, so an expected
         // regression failure cannot strand a child fiber or test-layer scope.
         yield* Deferred.succeed(replacementDone, undefined)
-        expect(yield* Fiber.join(replacement)).toBe(output)
+        expect(
+          yield* awaitWithTimeout(
+            Fiber.join(replacement),
+            "timed out waiting for replacement work to settle",
+          ),
+        ).toBe(output)
         expect(statusAfterOldIdle).toEqual({ type: "busy" })
       }).pipe(
         Effect.ensuring(
