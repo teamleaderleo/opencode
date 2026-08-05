@@ -62,50 +62,63 @@ describe("SessionRunState service authority", () => {
     Effect.gen(function* () {
       const runState = yield* SessionRunState.Service
       const status = yield* SessionStatus.Service
-
-      const first = yield* runState
-        .ensureRunning(
-          sessionID,
-          Effect.succeed(output),
-          status.set(sessionID, { type: "busy" }).pipe(Effect.as(output)),
-        )
-        .pipe(Effect.forkChild)
-
-      yield* Deferred.await(idlePublicationStarted)
-
       const replacementStarted = yield* Deferred.make<void>()
       const replacementDone = yield* Deferred.make<void>()
-      const replacement = yield* runState
-        .ensureRunning(
-          sessionID,
-          Effect.succeed(output),
-          Effect.gen(function* () {
-            yield* status.set(sessionID, { type: "busy" })
-            yield* Deferred.succeed(replacementStarted, undefined)
-            yield* Deferred.await(replacementDone)
-            return output
-          }),
-        )
-        .pipe(Effect.forkChild)
 
-      // Current code creates a replacement runner while the previous runner's
-      // idle publication is suspended. A serialized repair keeps this request
-      // pending until the old publication commits.
-      yield* Effect.raceFirst(
-        Deferred.await(replacementStarted),
-        Effect.sleep("100 millis"),
+      yield* Effect.gen(function* () {
+        const first = yield* runState
+          .ensureRunning(
+            sessionID,
+            Effect.succeed(output),
+            status.set(sessionID, { type: "busy" }).pipe(Effect.as(output)),
+          )
+          .pipe(Effect.forkChild)
+
+        yield* Deferred.await(idlePublicationStarted)
+
+        const replacement = yield* runState
+          .ensureRunning(
+            sessionID,
+            Effect.succeed(output),
+            Effect.gen(function* () {
+              yield* status.set(sessionID, { type: "busy" })
+              yield* Deferred.succeed(replacementStarted, undefined)
+              yield* Deferred.await(replacementDone)
+              return output
+            }),
+          )
+          .pipe(Effect.forkChild)
+
+        // Give current source enough time to start replacement work while the
+        // older idle publication is suspended. A serialized repair leaves the
+        // replacement pending until the older publication commits.
+        yield* Effect.sleep("100 millis")
+
+        yield* Deferred.succeed(allowIdlePublication, undefined)
+        expect(yield* Fiber.join(first)).toBe(output)
+        yield* Deferred.await(replacementStarted)
+
+        // Capture the status before replacement completion publishes its own
+        // idle transition. Current source records stale idle here; a repair
+        // keeps the replacement generation authoritative and therefore busy.
+        const statusAfterOldIdle = yield* status.get(sessionID)
+
+        // Always let the replacement finish before asserting, so an expected
+        // regression failure cannot strand a child fiber or test-layer scope.
+        yield* Deferred.succeed(replacementDone, undefined)
+        expect(yield* Fiber.join(replacement)).toBe(output)
+        expect(statusAfterOldIdle).toEqual({ type: "busy" })
+      }).pipe(
+        Effect.ensuring(
+          Effect.all(
+            [
+              Deferred.succeed(allowIdlePublication, undefined),
+              Deferred.succeed(replacementDone, undefined),
+            ],
+            { discard: true },
+          ),
+        ),
       )
-
-      yield* Deferred.succeed(allowIdlePublication, undefined)
-      expect(yield* Fiber.join(first)).toBe(output)
-      yield* Deferred.await(replacementStarted)
-
-      // Current behavior is idle here because the older publication resumes
-      // after replacement work has already made busy state authoritative.
-      expect(yield* status.get(sessionID)).toEqual({ type: "busy" })
-
-      yield* Deferred.succeed(replacementDone, undefined)
-      expect(yield* Fiber.join(replacement)).toBe(output)
     }),
   )
 })
