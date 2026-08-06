@@ -7,10 +7,6 @@ export interface Runner<A, E = never> {
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
   readonly ensureRunningHandle: (work: Effect.Effect<A, E>) => Effect.Effect<Effect.Effect<A, E>>
   readonly startShell: (work: Effect.Effect<A, E>, ready?: Latch.Latch) => Effect.Effect<A, E | Busy>
-  readonly startShellHandle: (
-    work: Effect.Effect<A, E>,
-    ready?: Latch.Latch,
-  ) => Effect.Effect<Effect.Effect<A, E | Busy>>
   readonly cancel: Effect.Effect<void>
 }
 
@@ -179,7 +175,7 @@ export const make = <A, E = never>(
 
   const ensureRunning = (work: Effect.Effect<A, E>) => ensureRunningHandle(work).pipe(Effect.flatten)
 
-  const startShellHandle = (work: Effect.Effect<A, E>, ready?: Latch.Latch) =>
+  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch): Effect.Effect<A, E | Busy> =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -208,10 +204,7 @@ export const make = <A, E = never>(
           { _tag: "Shell", shell },
         ] as const
       }),
-    )
-
-  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch) =>
-    startShellHandle(work, ready).pipe(Effect.flatten)
+    ).pipe(Effect.flatten)
 
   const cancel = SynchronizedRef.modify(ref, (st) => {
     switch (st._tag) {
@@ -264,7 +257,6 @@ export const make = <A, E = never>(
     ensureRunning,
     ensureRunningHandle,
     startShell,
-    startShellHandle,
     cancel,
   }
 }
