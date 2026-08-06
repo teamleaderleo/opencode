@@ -16,7 +16,7 @@ const bounded = <A, E, R>(effect: Effect.Effect<A, E, R>, message: string) =>
   )
 
 describe("SessionRunState idle authority", () => {
-  test("registry admission cannot cross an older idle publication", async () => {
+  test("reserved replacement cannot be followed by older idle", async () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -33,18 +33,24 @@ describe("SessionRunState idle authority", () => {
           const makeRunner = (current: Runners) => {
             let next!: Runner.Runner<SessionV1.WithParts>
             next = Runner.make<SessionV1.WithParts>(scope, {
-              onIdle: SynchronizedRef.modifyEffect(
-                runners,
-                Effect.fnUntraced(function* (owned) {
-                  if (next.pending) return [undefined, owned] as const
-                  yield* Deferred.succeed(idlePublicationStarted, undefined)
-                  yield* Deferred.await(allowIdlePublication)
-                  status = "idle"
-                  if (next.pending) return [undefined, owned] as const
-                  if (owned.get(sessionID) === next) owned.delete(sessionID)
+              onIdle: Effect.gen(function* () {
+                const publish = yield* SynchronizedRef.modify(runners, (owned) => [
+                  !next.pending && owned.get(sessionID) === next,
+                  owned,
+                ])
+                if (!publish) return
+
+                yield* Deferred.succeed(idlePublicationStarted, undefined)
+                yield* Deferred.await(allowIdlePublication)
+                status = "idle"
+
+                yield* SynchronizedRef.modify(runners, (owned) => {
+                  if (!next.pending && owned.get(sessionID) === next) {
+                    owned.delete(sessionID)
+                  }
                   return [undefined, owned] as const
-                }),
-              ),
+                })
+              }),
               onInterrupt: Effect.succeed(output),
             })
             current.set(sessionID, next)
@@ -85,8 +91,9 @@ describe("SessionRunState idle authority", () => {
             }),
           ).pipe(Effect.forkChild)
 
-          // Idle publication owns the synchronized registry, so replacement
-          // admission cannot create or reserve a Runner until it commits.
+          // Replacement may reserve the finishing Runner while idle publication
+          // is suspended, but cannot start and publish busy until the older idle
+          // effect returns.
           const startedBeforeIdle = yield* Effect.raceFirst(
             Deferred.await(replacementStarted).pipe(Effect.as(true)),
             Effect.sleep("100 millis").pipe(Effect.as(false)),
