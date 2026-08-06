@@ -5,7 +5,12 @@ export interface Runner<A, E = never> {
   readonly busy: boolean
   readonly pending: boolean
   readonly ensureRunning: (work: Effect.Effect<A, E>) => Effect.Effect<A, E>
+  readonly ensureRunningHandle: (work: Effect.Effect<A, E>) => Effect.Effect<Effect.Effect<A, E>>
   readonly startShell: (work: Effect.Effect<A, E>, ready?: Latch.Latch) => Effect.Effect<A, E | Busy>
+  readonly startShellHandle: (
+    work: Effect.Effect<A, E>,
+    ready?: Latch.Latch,
+  ) => Effect.Effect<Effect.Effect<A, E | Busy>>
   readonly cancel: Effect.Effect<void>
 }
 
@@ -85,9 +90,9 @@ export const make = <A, E = never>(
         return
       }
 
-      // Keep this Runner registered and non-startable while its external idle
-      // effect commits. Work admitted in this window is retained as `next` and
-      // starts only after the older generation can no longer publish state.
+      // Keep this Runner non-startable while its external idle effect commits.
+      // Work reserved in this window is retained as `next` and starts only
+      // after the older generation can no longer publish lifecycle state.
       const idleExit = yield* idle.pipe(Effect.exit)
 
       yield* SynchronizedRef.modifyEffect(
@@ -138,7 +143,7 @@ export const make = <A, E = never>(
       yield* Fiber.interrupt(shell.fiber)
     })
 
-  const ensureRunning = (work: Effect.Effect<A, E>) =>
+  const ensureRunningHandle = (work: Effect.Effect<A, E>) =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -170,9 +175,11 @@ export const make = <A, E = never>(
           }
         }
       }),
-    ).pipe(Effect.flatten)
+    )
 
-  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch): Effect.Effect<A, E | Busy> =>
+  const ensureRunning = (work: Effect.Effect<A, E>) => ensureRunningHandle(work).pipe(Effect.flatten)
+
+  const startShellHandle = (work: Effect.Effect<A, E>, ready?: Latch.Latch) =>
     SynchronizedRef.modifyEffect(
       ref,
       Effect.fnUntraced(function* (st) {
@@ -201,7 +208,10 @@ export const make = <A, E = never>(
           { _tag: "Shell", shell },
         ] as const
       }),
-    ).pipe(Effect.flatten)
+    )
+
+  const startShell = (work: Effect.Effect<A, E>, ready?: Latch.Latch) =>
+    startShellHandle(work, ready).pipe(Effect.flatten)
 
   const cancel = SynchronizedRef.modify(ref, (st) => {
     switch (st._tag) {
@@ -252,7 +262,9 @@ export const make = <A, E = never>(
       return current._tag === "Finishing" && current.next != null
     },
     ensureRunning,
+    ensureRunningHandle,
     startShell,
+    startShellHandle,
     cancel,
   }
 }
