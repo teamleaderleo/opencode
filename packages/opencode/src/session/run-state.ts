@@ -64,20 +64,27 @@ const layer = Layer.effect(
     ) => {
       let next!: Runner.Runner<SessionV1.WithParts>
       next = Runner.make<SessionV1.WithParts>(data.scope, {
-        onIdle: SynchronizedRef.modifyEffect(
-          data.runners,
-          Effect.fnUntraced(function* (current) {
-            // Registry ownership and Runner admission share this synchronized
-            // boundary. Work reserved before idle publication suppresses it;
-            // work arriving later cannot observe a deleted Runner until the
-            // older publication has fully committed.
-            if (next.pending) return [undefined, current] as const
-            yield* status.set(sessionID, { type: "idle" })
-            if (next.pending) return [undefined, current] as const
-            if (current.get(sessionID) === next) current.delete(sessionID)
+        onIdle: Effect.gen(function* () {
+          // Snapshot publication authority under the registry lock, but do not
+          // run the external status effect while holding it. A replacement may
+          // reserve this Runner during publication; Runner keeps it pending and
+          // cannot start it until this idle effect returns.
+          const publish = yield* SynchronizedRef.modify(data.runners, (current) => [
+            !next.pending && current.get(sessionID) === next,
+            current,
+          ])
+          if (!publish) return
+
+          yield* status.set(sessionID, { type: "idle" })
+
+          // Delete only if no replacement was reserved while publication was
+          // in flight. Otherwise the same Runner remains the registry owner and
+          // starts its pending generation immediately after this effect ends.
+          yield* SynchronizedRef.modify(data.runners, (current) => {
+            if (!next.pending && current.get(sessionID) === next) current.delete(sessionID)
             return [undefined, current] as const
-          }),
-        ),
+          })
+        }),
         onBusy: status.set(sessionID, { type: "busy" }),
         onInterrupt,
       })
