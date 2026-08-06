@@ -101,26 +101,12 @@ const layer = Layer.effect(
         }),
       )
 
-    const reserveShell = (
-      data: State,
-      sessionID: SessionID,
-      onInterrupt: Effect.Effect<SessionV1.WithParts>,
-      work: Effect.Effect<SessionV1.WithParts>,
-      ready?: Latch.Latch,
-    ) =>
-      SynchronizedRef.modifyEffect(
-        data.runners,
-        Effect.fnUntraced(function* (runners) {
-          const runner =
-            runners.get(sessionID) ?? makeRunner(data, runners, sessionID, onInterrupt)
-          const wait = yield* runner.startShellHandle(work, ready)
-          return [wait, runners] as const
-        }),
-      )
-
     const assertNotBusy = Effect.fn("SessionRunState.assertNotBusy")(function* (sessionID: SessionID) {
       const data = yield* InstanceState.get(state)
-      const busy = yield* SynchronizedRef.modify(data.runners, (runners) => [runners.get(sessionID)?.busy ?? false, runners])
+      const busy = yield* SynchronizedRef.modify(data.runners, (runners) => [
+        runners.get(sessionID)?.busy ?? false,
+        runners,
+      ])
       if (busy) yield* busyError(sessionID)
     })
 
@@ -156,8 +142,14 @@ const layer = Layer.effect(
       ready?: Latch.Latch,
     ) {
       const data = yield* InstanceState.get(state)
-      const wait = yield* reserveShell(data, sessionID, onInterrupt, work, ready)
-      return yield* wait.pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
+      const runner = yield* SynchronizedRef.modify(data.runners, (runners) => {
+        const current =
+          runners.get(sessionID) ?? makeRunner(data, runners, sessionID, onInterrupt)
+        return [current, runners] as const
+      })
+      return yield* runner
+        .startShell(work, ready)
+        .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
     return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
