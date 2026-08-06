@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Deferred, Effect, Fiber, Scope, Semaphore } from "effect"
+import { Deferred, Effect, Fiber, Scope } from "effect"
 import { Runner } from "@/effect/runner"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { SessionID } from "@/session/schema"
@@ -16,13 +16,12 @@ const bounded = <A, E, R>(effect: Effect.Effect<A, E, R>, message: string) =>
   )
 
 describe("SessionRunState idle authority", () => {
-  test("replacement admission waits for the previous idle publication", async () => {
+  test("replacement work starts only after the previous idle publication", async () => {
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
           const scope = yield* Scope.Scope
           const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
-          const lock = Semaphore.makeUnsafe(1)
           let status: "idle" | "busy" = "idle"
 
           const idlePublicationStarted = yield* Deferred.make<void>()
@@ -36,50 +35,47 @@ describe("SessionRunState idle authority", () => {
 
             let next!: Runner.Runner<SessionV1.WithParts>
             next = Runner.make<SessionV1.WithParts>(scope, {
-              onIdle: lock.withPermits(1)(
-                Effect.gen(function* () {
-                  if (next.pending) return
-                  if (runners.get(sessionID) !== next) return
-                  yield* Deferred.succeed(idlePublicationStarted, undefined)
-                  yield* Deferred.await(allowIdlePublication)
-                  status = "idle"
-                  if (runners.get(sessionID) === next) runners.delete(sessionID)
-                }),
-              ),
+              onIdle: Effect.gen(function* () {
+                if (next.pending) return
+                yield* Deferred.succeed(idlePublicationStarted, undefined)
+                yield* Deferred.await(allowIdlePublication)
+                status = "idle"
+                if (next.pending) return
+                if (runners.get(sessionID) === next) runners.delete(sessionID)
+              }),
               onInterrupt: Effect.succeed(output),
             })
             runners.set(sessionID, next)
             return next
           }
 
-          const ensureRunning = (work: Effect.Effect<SessionV1.WithParts>) =>
-            Effect.gen(function* () {
-              const wait = yield* lock.withPermits(1)(getRunner().ensureRunningHandle(work))
-              return yield* wait
-            })
-
-          const first = yield* ensureRunning(
-            Effect.sync(() => {
-              status = "busy"
-              return output
-            }),
-          ).pipe(Effect.forkChild)
+          const first = yield* getRunner()
+            .ensureRunning(
+              Effect.sync(() => {
+                status = "busy"
+                return output
+              }),
+            )
+            .pipe(Effect.forkChild)
 
           yield* bounded(
             Deferred.await(idlePublicationStarted),
             "timed out waiting for the first idle publication",
           )
 
-          const replacement = yield* ensureRunning(
-            Effect.gen(function* () {
-              status = "busy"
-              yield* Deferred.succeed(replacementStarted, undefined)
-              yield* Deferred.await(replacementDone)
-              return output
-            }),
-          ).pipe(Effect.forkChild)
+          const replacement = yield* getRunner()
+            .ensureRunning(
+              Effect.gen(function* () {
+                status = "busy"
+                yield* Deferred.succeed(replacementStarted, undefined)
+                yield* Deferred.await(replacementDone)
+                return output
+              }),
+            )
+            .pipe(Effect.forkChild)
 
-          // The session semaphore keeps admission behind the old publication.
+          // Runner retains replacement work while the old generation is in
+          // `Finishing`; it cannot publish busy before the old idle effect ends.
           const startedBeforeIdle = yield* Effect.raceFirst(
             Deferred.await(replacementStarted).pipe(Effect.as(true)),
             Effect.sleep("100 millis").pipe(Effect.as(false)),
@@ -94,6 +90,7 @@ describe("SessionRunState idle authority", () => {
           )
 
           expect(status).toBe("busy")
+          expect(runners.get(sessionID)).toBe(getRunner())
 
           yield* Deferred.succeed(replacementDone, undefined)
           expect(
