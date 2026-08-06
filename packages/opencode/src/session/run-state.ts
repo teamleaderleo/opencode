@@ -32,6 +32,12 @@ const layer = Layer.effect(
     const background = yield* BackgroundJob.Service
     const status = yield* SessionStatus.Service
 
+    type State = {
+      runners: Map<SessionID, Runner.Runner<SessionV1.WithParts>>
+      locks: Map<SessionID, Semaphore.Semaphore>
+      scope: Scope.Scope
+    }
+
     const state = yield* InstanceState.make(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
@@ -47,11 +53,9 @@ const layer = Layer.effect(
             locks.clear()
           }),
         )
-        return { runners, locks, scope }
+        return { runners, locks, scope } satisfies State
       }),
     )
-
-    type State = Effect.Effect.Success<ReturnType<typeof InstanceState.get<typeof state>>>
 
     const lock = (data: State, sessionID: SessionID) => {
       const existing = data.locks.get(sessionID)
