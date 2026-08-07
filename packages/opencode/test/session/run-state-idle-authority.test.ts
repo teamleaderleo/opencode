@@ -107,7 +107,7 @@ describe("SessionRunState idle authority", () => {
             "timed out waiting for replacement work",
           )
 
-          expect(status).toBe("busy")
+          expect(String(status)).toBe("busy")
           const current = yield* SynchronizedRef.get(runners)
           expect(current.get(sessionID)?.busy).toBe(true)
 
